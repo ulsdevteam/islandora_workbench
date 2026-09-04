@@ -2586,7 +2586,73 @@ def get_media_report_from_view():
     message = "CSV file is available at " + csv_file_path + "."
     logging.info(message)
     print(message)
+    
+    
+# --------------------------------------------------------------------------
+# Everything in this file belongs in the main 'workbench' script (not
+# workbench_export.py, and not WorkbenchConfig.py).
+# --------------------------------------------------------------------------
 
+# 1. Task function -- place alongside export_csv()/get_data_from_view()/
+#    get_media_report_from_view().
+
+def export_member_media():
+    """Export media files from a node and all of its recursively-discovered
+    members, via the members-of-node REST export View.
+    """
+    from workbench_export import MemberMediaExporter
+
+    if (
+        config["export_file_directory"] is not None
+        and os.path.isdir(config["export_file_directory"]) is False
+    ):
+        try:
+            os.mkdir(config["export_file_directory"])
+        except Exception as e:
+            message = (
+                'Path in configuration option "export_file_directory" ("'
+                + config["export_file_directory"]
+                + '") cannot be created.'
+            )
+            logging.error(message + " " + str(e))
+            sys.exit("Error: " + message + " See log for more detail.")
+
+    message = '"Export member media" task started using config file ' + args.config + "."
+    print(message)
+    logging.info(message)
+
+    exporter = MemberMediaExporter(config, args)
+    (
+        export_file_directory,
+        csv_path,
+        total_downloads,
+        successful_downloads,
+        unsuccessful_downloads,
+    ) = exporter.export()
+
+    if config["progress_bar"] is True:
+        exporter.pbar(100)
+
+    if config.get("export_member_media_report_only", False):
+        message = (
+            f"Report only: {successful_downloads} of {total_downloads} media file(s) "
+            f"found, {unsuccessful_downloads} node(s) with no matching media. "
+            f"Nothing was downloaded. Manifest written to {csv_path}."
+        )
+    elif config.get("export_file_url_instead_of_download", False):
+        message = (
+            f"{successful_downloads} of {total_downloads} media file URL(s) listed "
+            f"successfully, {unsuccessful_downloads} failed. Manifest written to {csv_path}."
+        )
+    else:
+        message = (
+            f"Media exported to {export_file_directory} "
+            f"({successful_downloads} of {total_downloads} file(s) succeeded, "
+            f"{unsuccessful_downloads} failed). Manifest written to {csv_path}."
+        )
+
+    logging.info(message)
+    print(message)
 
 def add_update_alt_text():
     """Add or update alt text to all image-type media for a node. This function is used in
@@ -3454,7 +3520,7 @@ if (
         )
 
 if "check" in config.keys():
-    tasks_to_skip = ["create_from_files", "get_data_from_view"]
+    tasks_to_skip = ["create_from_files", "get_data_from_view", "export_member_media"]
     if config["check"] is False and config["task"] not in tasks_to_skip:
         csv_data_to_count = get_csv_data(config)
         num_csv_records = len(list(csv_data_to_count))
@@ -3631,6 +3697,8 @@ try:
         add_update_alt_text()
     if config["task"] == "run_scripts":
         run_scripts()
+    if config["task"] == "export_member_media":
+        export_member_media()
 
     if config["secondary_tasks"] is not None and len(config["secondary_tasks"]) > 0:
         for secondary_config_file in config["secondary_tasks"]:

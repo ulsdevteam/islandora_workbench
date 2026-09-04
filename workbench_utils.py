@@ -1931,12 +1931,14 @@ def check_input(config: dict, args: Namespace) -> None:
         "add_alt_text",
         "update_alt_text",
         "run_scripts",
+        "export_member_media",
     ]
     joiner = ", "
     if config["task"] not in tasks:
         message = (
             '"task" in your configuration file must be one of "create", "update", "delete", "add_alt_text", "update_alt_text", '
-            + '"add_media", "update_media", "update_media_by_node", "delete_media", "delete_media_by_node", "create_from_files", "create_terms", "export_csv", "get_data_from_view", "update_terms", "create_redirects", or "run_scripts".'
+            + '"add_media", "update_media", "update_media_by_node", "delete_media", "delete_media_by_node", "create_from_files", '
+            + '"create_terms", "export_csv", "get_data_from_view", "update_terms", "create_redirects", "run_scripts", or "export_member_media".'
         )
         logging.error(message)
         sys.exit("Error: " + message)
@@ -2104,6 +2106,18 @@ def check_input(config: dict, args: Namespace) -> None:
         check_for_required_config_keys(
             config_keys, ["task", "host", "username", "password", "vocab_id"]
         )
+    elif config["task"] == "export_member_media":
+        check_for_required_config_keys(
+            config_keys, ["task", "host", "username", "password"]
+        )
+        if "input_csv" not in config and "node_id" not in config:
+            message = (
+                'For "export_member_media" tasks, you must provide either "input_csv" '
+                '(with a "node_id" column) or a single "node_id" setting.'
+            )
+            logging.error(message)
+            sys.exit("Error: " + message)
+            
 
     message = "OK, configuration file has all required values (did not check for optional values)."
     print(message)
@@ -2201,6 +2215,95 @@ def check_input(config: dict, args: Namespace) -> None:
                 'Warning: "perform_soft_checks" is enabled so you need to review your log for errors despite the "OK" reports above.'
             )
 
+        logging.info(
+            'Configuration checked for "%s" task using config file "%s", no problems found.',
+            config["task"],
+            args.config,
+        )
+        sys.exit()
+
+    if config["task"] == "export_member_media":
+        # This task doesn't use input_dir/input_csv the same way create/update
+        # do (its CSV, if present, is just a list of node_ids, not a fields
+        # CSV), so like get_data_from_view/get_media_report_from_view above,
+        # we exit immediately after these checks.
+        members_view_path = config.get(
+            "members_of_node_view_endpoint",
+            "/islandora_workbench_integration/members-of-node",
+        )
+        # Ping with a REAL node ID (the configured one, or the first row of
+        # input_csv), not a dummy placeholder -- and issue GET, not HEAD.
+        # get_member_node_ids() (the code that actually runs this task) uses
+        # GET, and Drupal Views REST export displays with a required
+        # contextual-filter argument frequently don't handle HEAD requests
+        # the same way, so validating with HEAD can fail even when the real
+        # runtime request would succeed.
+        if config.get("node_id"):
+            ping_node_id = config["node_id"]
+        else:
+            first_row = next(iter(get_csv_data(config)), None)
+            ping_node_id = first_row.get("node_id") if first_row else None
+
+        if ping_node_id:
+            view_url = f'{config["host"]}{members_view_path}/{ping_node_id}?page=0'
+            view_path_status_code = issue_request(config, "GET", view_url).status_code
+        else:
+            # Couldn't determine a real node ID to test with (shouldn't
+            # normally happen, since node_id/input_csv presence is already
+            # required above) -- fall back to a dummy ID, accepting 404 too
+            # since we can't be sure "0" corresponds to a real node here.
+            view_url = f'{config["host"]}{members_view_path}/0?page=0'
+            view_path_status_code = issue_request(config, "GET", view_url).status_code
+
+        if view_path_status_code not in (200, 404):        
+            message = f'Cannot access the "members of node" View at {config["host"]}{members_view_path}.'
+            logging.error(message)
+            sys.exit("Error: " + message)
+        else:
+            message = f'"Members of node" View at "{config["host"]}{members_view_path}" is accessible.'
+            logging.info(message)
+            print("OK, " + message)
+
+        if config.get("export_file_url_instead_of_download", False) is False:
+            if not config.get("export_file_directory"):
+                message = 'The "export_file_directory" configuration setting is required for "export_member_media" tasks unless "export_file_url_instead_of_download" is enabled.'
+                logging.error(message)
+                sys.exit("Error: " + message)
+            if not os.path.exists(config["export_file_directory"]):
+                try:
+                    os.mkdir(config["export_file_directory"])
+                    os.rmdir(config["export_file_directory"])
+                except Exception as e:
+                    message = (
+                        'Path in configuration option "export_file_directory" ("'
+                        + config["export_file_directory"]
+                        + '") is not writable.'
+                    )
+                    logging.error(message + " " + str(e))
+                    sys.exit("Error: " + message + " See log for more detail.")
+                    
+        if config.get("export_member_media_use_types"):
+            configured_use_types = config["export_member_media_use_types"]
+            resolved_use_types = resolve_media_use_term_ids(config, configured_use_types)
+            if len(resolved_use_types) < len(configured_use_types):
+                message = (
+                    'One or more values in "export_member_media_use_types" could '
+                    f'not be resolved to a real Media Use term on {config["host"]}. '
+                    "Check the log immediately above for which specific value(s) "
+                    "failed, and confirm the term name/URI/ID is correct."
+                )
+                logging.error(message)
+                sys.exit("Error: " + message)
+            else:
+                message = (
+                    'All configured "export_member_media_use_types" values '
+                    "resolved successfully."
+                )
+                logging.info(message)
+                print("OK, " + message)
+
+        message = "Configuration and input data appear to be valid."
+        print(message)
         logging.info(
             'Configuration checked for "%s" task using config file "%s", no problems found.',
             config["task"],
@@ -11315,6 +11418,153 @@ def download_file_from_drupal(
         logging.error(f"File download failed for node {node_id}: {str(e)}")
         return False
 
+def resolve_media_use_term_ids(config: dict, media_use_values: list) -> list:
+    """Resolve a list of Media Use values (term IDs, term names, or URIs)
+    into a list of term ID strings. Used by export_member_media's
+    export_member_media_use_types filtering setting -- a standalone
+    counterpart to the inline per-value resolution logic already in
+    get_node_media_ids(), kept separate so existing task behavior there
+    is not touched.
+
+    Parameters
+    :param config: dict - The configuration settings defined by WorkbenchConfig.get_config().
+    :param media_use_values: list - Term IDs, term names, or URIs.
+    :return: list - Resolved term ID strings. A value that can't be
+        resolved is skipped (logged as a warning), not fatal.
+    """
+    resolved = []
+    for value in media_use_values:
+        value = str(value).strip()
+        if value_is_numeric(value):
+            resolved.append(value)
+        elif value.startswith("http"):
+            term_info = get_all_representations_of_term(
+                config, vocab_id="islandora_media_use", uri=value
+            )
+            if term_info and term_info.get("term_id"):
+                resolved.append(str(term_info["term_id"]))
+            else:
+                logging.warning(f'Could not resolve Media Use URI "{value}" to a term ID.')
+        else:
+            term_info = get_all_representations_of_term(
+                config, vocab_id="islandora_media_use", name=value
+            )
+            if term_info and term_info.get("term_id"):
+                resolved.append(str(term_info["term_id"]))
+            else:
+                logging.warning(f'Could not resolve Media Use name "{value}" to a term ID.')
+    return resolved
+
+
+def get_all_media_files_for_node(
+    config: dict, node_id: str, allowed_media_use_tids: list = None
+) -> list:
+    """Return metadata for every file attached to every media item on a
+    node. By default (allowed_media_use_tids is None or empty) returns
+    files across ALL Media Use types. If allowed_media_use_tids is a
+    non-empty list of term IDs, only files belonging to a media item
+    that has at least one of those terms are included -- used by
+    export_member_media's export_member_media_use_types config setting.
+
+    Does not modify or call find_file_url_in_media()/get_media_file_url(),
+    which remain single-file/single-term and are still used unchanged by
+    export_csv/get_data_from_view.
+
+    Parameters
+    :param config: dict - The configuration settings defined by WorkbenchConfig.get_config().
+    :param node_id: str - The node ID to gather media file metadata for.
+    :param allowed_media_use_tids: list|None - Term IDs to filter to; None/empty means all.
+    :return: list - One dict per file found:
+        {"media_id": str|None, "media_use_type": str|None, "url": str, "filename": str}
+        "media_use_type" is a comma-joined string of term IDs if a media
+        item has more than one Media Use term attached. Empty list if the
+        node has no matching media, or media_list could not be retrieved.
+    """
+    media_list = get_media_list(config, node_id)
+    if not media_list:
+        return []
+
+    allowed_set = set(str(t) for t in allowed_media_use_tids) if allowed_media_use_tids else None
+
+    file_entries = []
+    for media in media_list:
+        media_id_field = media.get("mid", [{}])
+        media_id = media_id_field[0].get("value") if media_id_field else None
+
+        media_use_terms = media.get("field_media_use", [])
+        media_use_tids = [
+            str(term.get("target_id")) for term in media_use_terms if term.get("target_id")
+        ]
+
+        if allowed_set is not None and not (set(media_use_tids) & allowed_set):
+            continue
+
+        media_use_type = ",".join(media_use_tids)
+
+        for file_field in file_fields:
+            if file_field in media:
+                for file_info in media[file_field]:
+                    file_url = file_info.get("url")
+                    if file_url:
+                        # Derive the filename from the URL's PATH component
+                        # only, via urlparse, NOT from the raw URL string.
+                        # Some derivative media (e.g. Thumbnail Image) are
+                        # served from signed/tokenized URLs with a query
+                        # string (e.g. "?VersionId=..."), which a naive
+                        # os.path.basename(file_url) would include as part
+                        # of the "filename" -- corrupting the extension
+                        # detection downstream (e.g. producing
+                        # ".jpg?VersionId=..." as the "extension"). The
+                        # full, original file_url (WITH its query string)
+                        # is still what's stored as "url" and used for the
+                        # actual download request -- signed URLs typically
+                        # require that query string to authenticate at
+                        # all, so it must never be stripped from "url"
+                        # itself, only from what we use to derive a
+                        # filename/extension.
+                        clean_path = urllib.parse.urlparse(file_url).path
+                        file_entries.append(
+                            {
+                                "media_id": str(media_id) if media_id else None,
+                                "media_use_type": media_use_type or None,
+                                "url": file_url,
+                                "filename": os.path.basename(clean_path),
+                            }
+                        )
+
+    return file_entries
+
+
+def download_file_by_url(config: dict, url: str, target_path: str) -> dict:
+    """Download a single file from a URL to an exact, caller-computed
+    target path. Low-level helper -- callers are responsible for
+    computing target_path (filename construction, dedup, directory
+    creation) themselves. Used by export_member_media, which needs to
+    control the exact output filename (per its filename-format config
+    setting) rather than deriving it from the URL.
+
+    Parameters
+    :param config: dict - The configuration settings defined by WorkbenchConfig.get_config().
+    :param url: str - The file's URL.
+    :param target_path: str - Exact path (including filename) to save the file to.
+    :return: dict - {"path": str|None, "status": str}. status is
+        "downloaded" on success, or "failed_http_{code}"/"failed_exception"
+        on failure.
+    """
+    try:
+        response = requests.get(url, allow_redirects=True, verify=config["secure_ssl_only"])
+        if response.status_code == 200:
+            with open(target_path, "wb+") as f:
+                f.write(response.content)
+            logging.info(f'File "{os.path.basename(target_path)}" downloaded.')
+            return {"path": target_path, "status": "downloaded"}
+        else:
+            logging.error(f'Download failed for URL "{url}" (HTTP {response.status_code}).')
+            return {"path": None, "status": f"failed_http_{response.status_code}"}
+    except Exception as e:
+        logging.error(f'Download failed for URL "{url}": {e}')
+        return {"path": None, "status": "failed_exception"}
+    
 
 def get_file_hash_from_drupal(
     config: dict, file_uuid: str, algorithm: str

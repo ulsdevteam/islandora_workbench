@@ -2094,6 +2094,41 @@ def check_input(config: dict, args: Namespace) -> None:
         if config["export_csv_term_mode"] == "name":
             message = 'The "export_csv_term_mode" configuration option is set to "name", which will slow down the export.'
             print(message)
+        if config.get("export_csv_include_members", False):
+            members_view_path = config.get(
+                "members_of_node_view_endpoint",
+                "/islandora_workbench_integration/members-of-node",
+            )
+            # Dummy node ID (0) is fine here since export_csv can source
+            # its starting nodes several different ways (a CSV, or all
+            # nodes of a content type) -- unlike export_member_media,
+            # there's no single reliable place to pull a real node ID
+            # from for this check. GET, not HEAD (see the HEAD/GET
+            # mismatch already found and fixed for export_member_media's
+            # own check of this same View).
+            view_url = f'{config["host"]}{members_view_path}/0?page=0'
+            view_path_status_code = issue_request(config, "GET", view_url).status_code
+            if view_path_status_code not in (200, 404):
+                message = (
+                    f'Cannot access the "members of node" View at '
+                    f'{config["host"]}{members_view_path}, required when '
+                    f'"export_csv_include_members" is enabled.'
+                )
+                logging.error(message)
+                sys.exit("Error: " + message)
+            else:
+                message = (
+                    f'"Members of node" View at "{config["host"]}{members_view_path}" '
+                    f"is accessible."
+                )
+                logging.info(message)
+                print("OK, " + message)
+
+            max_depth = config.get("csv_member_max_depth")
+            if max_depth is not None and value_is_numeric(max_depth) is False:
+                message = 'The "csv_member_max_depth" configuration setting must be a whole number if provided.'
+                logging.error(message)
+                sys.exit("Error: " + message)
     elif config["task"] == "create_terms":
         check_for_required_config_keys(
             config_keys, ["task", "host", "username", "password", "vocab_id"]
@@ -2117,7 +2152,6 @@ def check_input(config: dict, args: Namespace) -> None:
             )
             logging.error(message)
             sys.exit("Error: " + message)
-            
 
     message = "OK, configuration file has all required values (did not check for optional values)."
     print(message)
@@ -2157,6 +2191,39 @@ def check_input(config: dict, args: Namespace) -> None:
             message = f'View REST export at "{view_url_for_message}" is accessible.'
             logging.info(message)
             print("OK, " + message)
+
+        if config["task"] == "get_data_from_view" and config.get(
+            "get_data_from_view_include_members", False
+        ):
+            members_view_path = config.get(
+                "members_of_node_view_endpoint",
+                "/islandora_workbench_integration/members-of-node",
+            )
+            members_view_url = f'{config["host"]}{members_view_path}/0?page=0'
+            members_view_status_code = issue_request(
+                config, "GET", members_view_url
+            ).status_code
+            if members_view_status_code not in (200, 404):
+                message = (
+                    f'Cannot access the "members of node" View at '
+                    f'{config["host"]}{members_view_path}, required when '
+                    f'"get_data_from_view_include_members" is enabled.'
+                )
+                logging.error(message)
+                sys.exit("Error: " + message)
+            else:
+                message = (
+                    f'"Members of node" View at "{config["host"]}{members_view_path}" '
+                    f"is accessible."
+                )
+                logging.info(message)
+                print("OK, " + message)
+
+            max_depth = config.get("view_member_max_depth")
+            if max_depth is not None and value_is_numeric(max_depth) is False:
+                message = 'The "view_member_max_depth" configuration setting must be a whole number if provided.'
+                logging.error(message)
+                sys.exit("Error: " + message)
 
         if config["export_file_directory"] is not None:
             if not os.path.exists(config["export_file_directory"]):
@@ -2255,7 +2322,7 @@ def check_input(config: dict, args: Namespace) -> None:
             view_url = f'{config["host"]}{members_view_path}/0?page=0'
             view_path_status_code = issue_request(config, "GET", view_url).status_code
 
-        if view_path_status_code not in (200, 404):        
+        if view_path_status_code not in (200, 404):
             message = f'Cannot access the "members of node" View at {config["host"]}{members_view_path}.'
             logging.error(message)
             sys.exit("Error: " + message)
@@ -2281,7 +2348,7 @@ def check_input(config: dict, args: Namespace) -> None:
                     )
                     logging.error(message + " " + str(e))
                     sys.exit("Error: " + message + " See log for more detail.")
-                    
+
         if config.get("export_member_media_use_types"):
             configured_use_types = config["export_member_media_use_types"]
             resolved_use_types = resolve_media_use_term_ids(config, configured_use_types)
@@ -11564,7 +11631,7 @@ def download_file_by_url(config: dict, url: str, target_path: str) -> dict:
     except Exception as e:
         logging.error(f'Download failed for URL "{url}": {e}')
         return {"path": None, "status": "failed_exception"}
-    
+
 
 def get_file_hash_from_drupal(
     config: dict, file_uuid: str, algorithm: str
